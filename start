@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# Обновление списка пакетов и установка зависимостей
+sudo apt update
+sudo apt install -y unzip logrotate git jq sed wget curl coreutils systemd
+
+# Создание временной директории и переход в нее не требуется для основной установки
+
+# Установка Go
+go_package_url="https://go.dev/dl/go1.20.5.linux-amd64.tar.gz"
+wget -q $go_package_url
+sudo tar -C /usr/local -xzf $(basename $go_package_url)
+echo "export PATH=\$PATH:/usr/local/go/bin" >>~/.profile
+echo "export PATH=\$PATH:\$(go env GOPATH)/bin" >>~/.profile
+source ~/.profile
+
+# Проверка установки Go
+go version
+go env GOPATH
+echo $PATH
+
+# Настройка локального узла
+git clone https://github.com/lavanet/lava-config.git
+cd lava-config/testnet-2
+source setup_config/setup_config.sh
+
+mkdir -p $lavad_home_folder
+mkdir -p $lava_config_folder
+cp default_lavad_config_files/* $lava_config_folder
+cp genesis_json/genesis.json $lava_config_folder/genesis.json
+
+# Установка Cosmovisor
+go install github.com/cosmos/cosmos-sdk/cosmovisor/cmd/cosmovisor@v1.0.0
+mkdir -p $lavad_home_folder/cosmovisor/genesis/bin/
+wget -O $lavad_home_folder/cosmovisor/genesis/bin/lavad "https://github.com/lavanet/lava/releases/download/v0.21.1.2/lavad-v0.21.1.2-linux-amd64"
+chmod +x $lavad_home_folder/cosmovisor/genesis/bin/lavad
+
+# Настройка переменных окружения для Cosmovisor и lavad
+echo "# Setup Cosmovisor and lavad" >> ~/.profile
+echo "export DAEMON_NAME=lavad" >> ~/.profile
+echo "export DAEMON_HOME=$HOME/.lava" >> ~/.profile
+echo "export DAEMON_ALLOW_DOWNLOAD_BINARIES=true" >> ~/.profile
+echo "export DAEMON_LOG_BUFFER_SIZE=512" >> ~/.profile
+echo "export DAEMON_RESTART_AFTER_UPGRADE=true" >> ~/.profile
+echo "export UNSAFE_SKIP_BACKUP=true" >> ~/.profile
+echo "export current_lavad_binary=/root/.lava/cosmovisor/genesis/bin/lavad
+" >> ~/.profile
+source ~/.profile
+
+# Инициализация lavad
+$lavad_home_folder/cosmovisor/genesis/bin/lavad init my-node --chain-id lava-testnet-2 --home $lavad_home_folder
+cp genesis_json/genesis.json $lava_config_folder/genesis.json
+
+# Создание файла systemd unit для Cosmovisor
+echo "[Unit]
+Description=Cosmovisor daemon
+After=network-online.target
+[Service]
+Environment=\"DAEMON_NAME=lavad\"
+Environment=\"DAEMON_HOME=${HOME}/.lava\"
+Environment=\"DAEMON_RESTART_AFTER_UPGRADE=true\"
+Environment=\"DAEMON_ALLOW_DOWNLOAD_BINARIES=true\"
+Environment=\"DAEMON_LOG_BUFFER_SIZE=512\"
+Environment=\"UNSAFE_SKIP_BACKUP=true\"
+User=$(whoami)
+ExecStart=${HOME}/.lava/cosmovisor/genesis/bin/lavad start --home=${HOME}/.lava
+Restart=always
+RestartSec=3
+LimitNOFILE=infinity
+LimitNPROC=infinity
+[Install]
+WantedBy=multi-user.target
+" > cosmovisor.service
+sudo mv cosmovisor.service /etc/systemd/system/cosmovisor.service
+
+# Включение и запуск службы Cosmovisor
+sudo systemctl daemon-reload
+sudo systemctl enable cosmovisor.service
+sudo systemctl restart systemd-journald
+sudo systemctl start cosmovisor
+
+# Проверка статуса узла
+echo "Проверка статуса Cosmovisor..."
+sudo systemctl status cosmovisor
